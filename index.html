@@ -160,11 +160,12 @@
     </ul>
     <p>Severity is a simple weighted count of these signals, shown as high/medium so you know where to spend editing time first — it is not a probability and is not calibrated against Pangram's own scoring. Detectors like Pangram reportedly operate on hard internal thresholds, so a single small edit near that boundary can flip a verdict even though the underlying text barely changed — a paragraph still being flagged after one fix doesn't necessarily mean the fix did nothing.</p>
     <p><strong>The "3 variations" per flagged paragraph</strong> are generated mechanically — reordering your existing sentences, merging two with a semicolon, or applying literal fixes (stripping a leading connector, swapping a nominalization for its verb form, converting a clear passive-with-"by" sentence to active voice) — never inventing new wording. When a paragraph is too short or simple for 3 safe mechanical moves, fewer are shown rather than padding with a fake one. Always proofread a variation before using it — mechanical reordering can occasionally read awkwardly even when grammatically valid.</p>
-    <p><strong>Uploading a Pangram report PDF</strong> extracts each colored segment Pangram itself labeled (Human Written / AI Assisted / Fully AI Generated, with its confidence level), entirely in your browser via a locally-bundled copy of Mozilla's pdf.js — the PDF is never uploaded anywhere. Each segment is then run through the same structural checks above, so you can see where Pangram's own verdict and this tool's structural evidence agree or disagree. Parsing is based on Pangram's current report layout and may break if they change its format — if a PDF doesn't parse, the extracted text still lands in the box above for you to check and analyze manually.</p>
+    <p><strong>Uploading a Pangram report PDF</strong> extracts each colored segment Pangram itself labeled (Human Written / AI Assisted / Fully AI Generated, with its confidence level), entirely in your browser via a locally-bundled copy of Mozilla's pdf.js — the PDF is never uploaded anywhere. Each segment is then run through the same structural checks above, so you can see where Pangram's own verdict and this tool's structural evidence agree or disagree. Parsing is based on Pangram's current report layout and may break if they change its format — if a PDF doesn't parse, the extracted text still lands in the box above for you to check and analyze manually. If a page has no real text layer (Pangram's report export is a rasterized image, not real text), it's run through a locally-bundled copy of Tesseract.js OCR instead — also entirely in-browser, nothing uploaded — which is generally accurate but not perfect (it reliably misreads "AI" as "Al", which is corrected automatically; other misreads may slip through, so proofread OCR'd text before trusting the analysis).</p>
   </details>
 </div>
 
 <script src="vendor/pdfjs/pdf.min.js"></script>
+<script src="vendor/tesseractjs/tesseract.min.js"></script>
 <script>
 (function () {
   const GENERIC_PHRASES = [
@@ -799,39 +800,80 @@ Rewrite it into exactly 3 distinct versions that address these specific patterns
 
   pdfBtn.addEventListener("click", () => pdfInput.click());
 
+  function normalizeOcrText(text) {
+    return text.replace(/\bAl\b/g, "AI");
+  }
+
+  async function ocrPage(ocrWorker, page, pageNum, numPages) {
+    const viewport = page.getViewport({ scale: 2.5 });
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext("2d");
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    pdfStatus.textContent = `No text layer on page ${pageNum}/${numPages} — running OCR (this can take a while)…`;
+    const { data } = await ocrWorker.recognize(canvas);
+    return normalizeOcrText(data.text || "");
+  }
+
   pdfInput.addEventListener("change", async () => {
     const file = pdfInput.files[0];
     if (!file) return;
     pdfStatus.textContent = "Reading PDF…";
+    let ocrWorker = null;
     try {
       if (!window.pdfjsLib) throw new Error("pdf.js failed to load (vendor/pdfjs/pdf.min.js missing or blocked).");
       const buf = await file.arrayBuffer();
       const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
       let fullText = "";
+      let ocrUsed = false;
+
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
         const content = await page.getTextContent();
-        fullText += reconstructPdfText(content.items) + "\n\n";
+        let pageText = reconstructPdfText(content.items);
+
+        if (pageText.trim().length < 20) {
+          if (!window.Tesseract) throw new Error("Tesseract.js failed to load (vendor/tesseractjs/tesseract.min.js missing or blocked).");
+          if (!ocrWorker) {
+            pdfStatus.textContent = "No text layer found — loading OCR engine (one-time, ~6MB)…";
+            ocrWorker = await Tesseract.createWorker("eng", 1, {
+              workerPath: "vendor/tesseractjs/worker.min.js",
+              corePath: "vendor/tesseractjs/tesseract-core-lstm.wasm.js",
+              langPath: "vendor/tesseractjs",
+              gzip: true,
+            });
+          }
+          pageText = await ocrPage(ocrWorker, page, i, pdf.numPages);
+          ocrUsed = true;
+        }
+
+        fullText += pageText + "\n\n";
       }
       fullText = fullText.trim();
+      if (ocrWorker) await ocrWorker.terminate();
 
       const segments = extractPangramSegments(fullText);
+      const ocrNote = ocrUsed
+        ? " OCR was used for image-only pages — proofread for misreads before relying on the analysis."
+        : "";
       if (segments.length) {
         const articleText = segments.map((s) => s.text).join("\n\n");
         document.getElementById("input").value = articleText;
         renderPangramSegments(segments);
         pdfStatus.textContent =
-          `Parsed ${pdf.numPages} page${pdf.numPages === 1 ? "" : "s"} into ${segments.length} Pangram-labeled segment${segments.length === 1 ? "" : "s"}. Editing the text above and clicking Analyze will switch back to normal paragraph-based checking.`;
+          `Parsed ${pdf.numPages} page${pdf.numPages === 1 ? "" : "s"} into ${segments.length} Pangram-labeled segment${segments.length === 1 ? "" : "s"}.${ocrNote} Editing the text above and clicking Analyze will switch back to normal paragraph-based checking.`;
       } else if (fullText.length === 0) {
         pdfStatus.textContent =
-          `This PDF has no extractable text layer — pdf.js found 0 characters across ${pdf.numPages} page${pdf.numPages === 1 ? "" : "s"}, meaning it's an image/scanned export rather than real text. Instead, try copying the text directly from Pangram's report page in your browser (select-all on the page, not the PDF) and pasting it into the box above, then click Analyze — pasted text with Pangram's "Label | Words | Confidence" markers is detected automatically.`;
+          `Couldn't extract any usable text from this PDF, even with OCR — it may be blank, corrupted, or unusually low-resolution. Try copying the text directly from Pangram's report page in your browser instead.`;
       } else {
         document.getElementById("input").value = fullText;
         render(splitIntoBlocks(fullText));
         pdfStatus.textContent =
-          `Extracted text from ${pdf.numPages} page${pdf.numPages === 1 ? "" : "s"}, but couldn't find Pangram's segment labels (report layout may have changed) — dropped the raw text into the box above instead. Review it before analyzing.`;
+          `Extracted text from ${pdf.numPages} page${pdf.numPages === 1 ? "" : "s"}, but couldn't find Pangram's segment labels (report layout may have changed).${ocrNote} Dropped the raw text into the box above instead — review it before analyzing.`;
       }
     } catch (err) {
+      if (ocrWorker) { try { await ocrWorker.terminate(); } catch (e) {} }
       pdfStatus.textContent = "Couldn't read that PDF: " + err.message;
     }
     pdfInput.value = "";
