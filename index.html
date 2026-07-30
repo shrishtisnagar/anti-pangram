@@ -82,11 +82,19 @@
   .para-text { white-space: pre-wrap; margin: 0 0 8px; }
   .badge {
     display: inline-block; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em;
-    padding: 2px 8px; border-radius: 999px; margin-bottom: 8px; text-transform: uppercase;
+    padding: 2px 8px; border-radius: 999px; text-transform: uppercase;
   }
   .risk-high .badge { background: var(--risk-high-border); color: #fff; }
   .risk-med .badge { background: var(--risk-med-border); color: #201f22; }
   .risk-low .badge { background: var(--risk-low-border); color: var(--muted); }
+  .para-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+  .copy-btn {
+    background: transparent; color: var(--accent); border: 1px solid var(--accent);
+    border-radius: 6px; padding: 3px 10px; font-size: 0.76rem; font-weight: 600;
+    cursor: pointer; margin: 0;
+  }
+  .copy-btn:hover { background: var(--accent); color: #fff; }
+  .copy-btn:disabled { opacity: 0.7; cursor: default; }
   details { margin-top: 6px; }
   summary { cursor: pointer; font-size: 0.85rem; color: var(--accent); font-weight: 600; }
   .evidence-list, .suggestion-list { margin: 8px 0 0; padding-left: 20px; font-size: 0.88rem; }
@@ -483,6 +491,48 @@
     return variations;
   }
 
+  function buildAiPrompt(paraText, evidence) {
+    const issues = evidence.map((e, i) => `${i + 1}. ${e}`).join("\n");
+    return `An AI-detection tool (Pangram) flagged the paragraph below as likely AI-generated, based on these specific patterns:
+
+${issues}
+
+Original paragraph:
+"""
+${paraText}
+"""
+
+Rewrite it into exactly 3 distinct versions that address these specific patterns. Preserve the original meaning, facts, and any personal details exactly as given -- do not invent new examples, numbers, or claims that aren't already there. Vary sentence rhythm and word choice the way a person editing their own writing would, not by performing "more human" as a style. Label them Version 1, Version 2, Version 3.`;
+  }
+
+  async function copyText(text, btn) {
+    const original = btn.textContent;
+    const flash = (label) => {
+      btn.textContent = label;
+      btn.disabled = true;
+      setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1500);
+    };
+    try {
+      await navigator.clipboard.writeText(text);
+      flash("Copied!");
+    } catch (err) {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        flash("Copied!");
+      } catch (err2) {
+        flash("Copy failed");
+      }
+    }
+  }
+
   function riskClass(score) {
     if (score >= 3.5) return "risk-high";
     if (score >= 1.5) return "risk-med";
@@ -516,10 +566,26 @@
       const cls = riskClass(score);
       div.className = "para-block " + cls;
 
+      const toolbar = document.createElement("div");
+      toolbar.className = "para-toolbar";
+
       const badge = document.createElement("span");
       badge.className = "badge";
       badge.textContent = riskLabel(score) + " risk";
-      div.appendChild(badge);
+      toolbar.appendChild(badge);
+
+      if (evidence.length) {
+        const copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "copy-btn";
+        copyBtn.textContent = "Copy AI prompt";
+        copyBtn.addEventListener("click", () => {
+          copyText(buildAiPrompt(text, evidence), copyBtn);
+        });
+        toolbar.appendChild(copyBtn);
+      }
+
+      div.appendChild(toolbar);
 
       const p = document.createElement("p");
       p.className = "para-text";
