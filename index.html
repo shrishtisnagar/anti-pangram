@@ -749,7 +749,15 @@ Rewrite it into exactly 3 distinct versions that address these specific patterns
 
   document.getElementById("analyzeBtn").addEventListener("click", () => {
     const text = document.getElementById("input").value;
-    render(splitIntoBlocks(text));
+    const segments = extractPangramSegments(text);
+    if (segments.length) {
+      renderPangramSegments(segments);
+      document.getElementById("pdfStatus").textContent =
+        `Detected Pangram's "Label | Words | Confidence" markers in the pasted text — showing ${segments.length} Pangram-labeled segment${segments.length === 1 ? "" : "s"} instead of plain paragraph analysis.`;
+    } else {
+      document.getElementById("pdfStatus").textContent = "";
+      render(splitIntoBlocks(text));
+    }
   });
 
   function reconstructPdfText(items) {
@@ -814,6 +822,9 @@ Rewrite it into exactly 3 distinct versions that address these specific patterns
         renderPangramSegments(segments);
         pdfStatus.textContent =
           `Parsed ${pdf.numPages} page${pdf.numPages === 1 ? "" : "s"} into ${segments.length} Pangram-labeled segment${segments.length === 1 ? "" : "s"}. Editing the text above and clicking Analyze will switch back to normal paragraph-based checking.`;
+      } else if (fullText.length === 0) {
+        pdfStatus.textContent =
+          `This PDF has no extractable text layer — pdf.js found 0 characters across ${pdf.numPages} page${pdf.numPages === 1 ? "" : "s"}, meaning it's an image/scanned export rather than real text. Instead, try copying the text directly from Pangram's report page in your browser (select-all on the page, not the PDF) and pasting it into the box above, then click Analyze — pasted text with Pangram's "Label | Words | Confidence" markers is detected automatically.`;
       } else {
         document.getElementById("input").value = fullText;
         render(splitIntoBlocks(fullText));
