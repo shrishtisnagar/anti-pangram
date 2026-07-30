@@ -72,6 +72,10 @@
   button:hover { filter: brightness(1.08); }
   button.secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); font-weight: 500; }
   .stat { font-size: 0.82rem; color: var(--muted); }
+  .pdf-status { font-size: 0.82rem; color: var(--muted); margin: -4px 0 4px; min-height: 1.2em; }
+  .pangram-badge.pangram-ai { background: var(--risk-high-border); color: #fff; }
+  .pangram-badge.pangram-assisted { background: var(--risk-med-border); color: #201f22; }
+  .pangram-badge.pangram-human { background: #3a9a5c; color: #fff; }
   #report { margin-top: 26px; }
   .para-block {
     border: 1px solid var(--border); border-left: 4px solid var(--risk-low-border);
@@ -133,8 +137,11 @@
   <div class="row">
     <button id="analyzeBtn">Analyze</button>
     <button id="sampleBtn" class="secondary">Load example</button>
+    <button id="pdfBtn" class="secondary">Upload Pangram report PDF</button>
+    <input type="file" id="pdfInput" accept="application/pdf" style="display:none">
     <span class="stat" id="statLine"></span>
   </div>
+  <p class="pdf-status" id="pdfStatus"></p>
 
   <div id="report"></div>
 
@@ -153,9 +160,11 @@
     </ul>
     <p>Severity is a simple weighted count of these signals, shown as high/medium so you know where to spend editing time first — it is not a probability and is not calibrated against Pangram's own scoring. Detectors like Pangram reportedly operate on hard internal thresholds, so a single small edit near that boundary can flip a verdict even though the underlying text barely changed — a paragraph still being flagged after one fix doesn't necessarily mean the fix did nothing.</p>
     <p><strong>The "3 variations" per flagged paragraph</strong> are generated mechanically — reordering your existing sentences, merging two with a semicolon, or applying literal fixes (stripping a leading connector, swapping a nominalization for its verb form, converting a clear passive-with-"by" sentence to active voice) — never inventing new wording. When a paragraph is too short or simple for 3 safe mechanical moves, fewer are shown rather than padding with a fake one. Always proofread a variation before using it — mechanical reordering can occasionally read awkwardly even when grammatically valid.</p>
+    <p><strong>Uploading a Pangram report PDF</strong> extracts each colored segment Pangram itself labeled (Human Written / AI Assisted / Fully AI Generated, with its confidence level), entirely in your browser via a locally-bundled copy of Mozilla's pdf.js — the PDF is never uploaded anywhere. Each segment is then run through the same structural checks above, so you can see where Pangram's own verdict and this tool's structural evidence agree or disagree. Parsing is based on Pangram's current report layout and may break if they change its format — if a PDF doesn't parse, the extracted text still lands in the box above for you to check and analyze manually.</p>
   </details>
 </div>
 
+<script src="vendor/pdfjs/pdf.min.js"></script>
 <script>
 (function () {
   const GENERIC_PHRASES = [
@@ -533,6 +542,40 @@ Rewrite it into exactly 3 distinct versions that address these specific patterns
     }
   }
 
+  const PANGRAM_SEGMENT_RE = /(Fully AI Generated|Moderately AI Assisted|Lightly AI Assisted|AI Assisted|Human Written)\s*\|?\s*(\d+)\s*Words\s*\|?\s*(High|Medium|Low)\s*Confidence/gi;
+
+  function stripPangramChrome(text) {
+    return text
+      .split("\n")
+      .filter((line) => {
+        const t = line.trim();
+        if (!t) return true;
+        if (/^Pangram\.?$/i.test(t)) return false;
+        if (/^Pangram\s+\d+(\.\d+)?$/i.test(t)) return false;
+        if (/^Page\s+\d+\s*\/\s*\d+$/i.test(t)) return false;
+        if (/^[A-Za-z]+\s+\d{1,2},\s*\d{4}\s*[•·]\s*.+$/.test(t)) return false;
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t)) return false;
+        return true;
+      })
+      .join("\n");
+  }
+
+  function extractPangramSegments(rawText) {
+    const cleaned = stripPangramChrome(rawText);
+    const matches = [...cleaned.matchAll(PANGRAM_SEGMENT_RE)];
+    const segments = [];
+    for (let i = 0; i < matches.length; i++) {
+      const m = matches[i];
+      const start = m.index + m[0].length;
+      const end = i + 1 < matches.length ? matches[i + 1].index : cleaned.length;
+      const body = cleaned.slice(start, end).replace(/\s+/g, " ").trim();
+      if (body) {
+        segments.push({ verdict: m[1], words: parseInt(m[2], 10), confidence: m[3], text: body });
+      }
+    }
+    return segments;
+  }
+
   function riskClass(score) {
     if (score >= 3.5) return "risk-high";
     if (score >= 1.5) return "risk-med";
@@ -542,6 +585,119 @@ Rewrite it into exactly 3 distinct versions that address these specific patterns
     if (score >= 3.5) return "High";
     if (score >= 1.5) return "Medium";
     return "Low";
+  }
+
+  function pangramBadgeClass(verdict) {
+    const v = verdict.toLowerCase();
+    if (v.includes("human")) return "pangram-human";
+    if (v.includes("fully")) return "pangram-ai";
+    return "pangram-assisted";
+  }
+
+  function buildBlockElement({ text, sentences, score, evidence, suggestions, pangramInfo }) {
+    const div = document.createElement("div");
+    const cls = riskClass(score);
+    div.className = "para-block " + cls;
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "para-toolbar";
+
+    if (pangramInfo) {
+      const pBadge = document.createElement("span");
+      pBadge.className = "badge pangram-badge " + pangramBadgeClass(pangramInfo.verdict);
+      pBadge.textContent = `Pangram: ${pangramInfo.verdict} · ${pangramInfo.confidence} confidence`;
+      toolbar.appendChild(pBadge);
+    }
+
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    badge.textContent = riskLabel(score) + (pangramInfo ? " structural risk" : " risk");
+    toolbar.appendChild(badge);
+
+    if (evidence.length) {
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "copy-btn";
+      copyBtn.textContent = "Copy AI prompt";
+      copyBtn.addEventListener("click", () => {
+        copyText(buildAiPrompt(text, evidence), copyBtn);
+      });
+      toolbar.appendChild(copyBtn);
+    }
+
+    div.appendChild(toolbar);
+
+    const p = document.createElement("p");
+    p.className = "para-text";
+    p.textContent = text;
+    div.appendChild(p);
+
+    if (evidence.length) {
+      const details = document.createElement("details");
+      details.open = cls === "risk-high";
+      const summary = document.createElement("summary");
+      summary.textContent = `Evidence & suggestions (${evidence.length})`;
+      details.appendChild(summary);
+
+      const evLabel = document.createElement("div");
+      evLabel.className = "section-label";
+      evLabel.textContent = "Why it was flagged";
+      details.appendChild(evLabel);
+
+      const evList = document.createElement("ul");
+      evList.className = "evidence-list";
+      evidence.forEach((e) => {
+        const li = document.createElement("li");
+        li.textContent = e;
+        evList.appendChild(li);
+      });
+      details.appendChild(evList);
+
+      const sugLabel = document.createElement("div");
+      sugLabel.className = "section-label";
+      sugLabel.textContent = "What to try";
+      details.appendChild(sugLabel);
+
+      const sugList = document.createElement("ul");
+      sugList.className = "suggestion-list";
+      suggestions.forEach((s) => {
+        const li = document.createElement("li");
+        li.textContent = s;
+        sugList.appendChild(li);
+      });
+      details.appendChild(sugList);
+
+      const variations = generateVariations(sentences);
+      const varLabel = document.createElement("div");
+      varLabel.className = "section-label";
+      varLabel.textContent = "3 variations to try (mechanical — your own words, reordered/merged/trimmed)";
+      details.appendChild(varLabel);
+
+      if (variations.length < 3) {
+        const note = document.createElement("p");
+        note.className = "var-note";
+        note.textContent = `Only ${variations.length} safe mechanical variation${variations.length === 1 ? "" : "s"} available — this paragraph is short/simple enough that generating a 3rd without inventing content risks being dishonest, so it's left out rather than faked.`;
+        details.appendChild(note);
+      }
+
+      variations.forEach((v) => {
+        const box = document.createElement("div");
+        box.className = "variation-box";
+        const vLabel = document.createElement("div");
+        vLabel.className = "variation-label";
+        vLabel.textContent = v.label;
+        const vText = document.createElement("p");
+        vText.className = "variation-text";
+        vText.textContent = v.text;
+        box.appendChild(vLabel);
+        box.appendChild(vText);
+        details.appendChild(box);
+      });
+
+      div.appendChild(details);
+    }
+
+    return div;
   }
 
   function render(blocks) {
@@ -562,116 +718,112 @@ Rewrite it into exactly 3 distinct versions that address these specific patterns
       const { sentences, score, evidence, suggestions } = analyzeParagraph(text, followsList);
       prevType = block.type;
 
-      const div = document.createElement("div");
-      const cls = riskClass(score);
-      div.className = "para-block " + cls;
-
-      const toolbar = document.createElement("div");
-      toolbar.className = "para-toolbar";
-
-      const badge = document.createElement("span");
-      badge.className = "badge";
-      badge.textContent = riskLabel(score) + " risk";
-      toolbar.appendChild(badge);
-
-      if (evidence.length) {
-        const copyBtn = document.createElement("button");
-        copyBtn.type = "button";
-        copyBtn.className = "copy-btn";
-        copyBtn.textContent = "Copy AI prompt";
-        copyBtn.addEventListener("click", () => {
-          copyText(buildAiPrompt(text, evidence), copyBtn);
-        });
-        toolbar.appendChild(copyBtn);
-      }
-
-      div.appendChild(toolbar);
-
-      const p = document.createElement("p");
-      p.className = "para-text";
-      p.textContent = text;
-      div.appendChild(p);
-
-      if (evidence.length) {
-        flaggedCount++;
-        const details = document.createElement("details");
-        details.open = cls === "risk-high";
-        const summary = document.createElement("summary");
-        summary.textContent = `Evidence & suggestions (${evidence.length})`;
-        details.appendChild(summary);
-
-        const evLabel = document.createElement("div");
-        evLabel.className = "section-label";
-        evLabel.textContent = "Why it was flagged";
-        details.appendChild(evLabel);
-
-        const evList = document.createElement("ul");
-        evList.className = "evidence-list";
-        evidence.forEach((e) => {
-          const li = document.createElement("li");
-          li.textContent = e;
-          evList.appendChild(li);
-        });
-        details.appendChild(evList);
-
-        const sugLabel = document.createElement("div");
-        sugLabel.className = "section-label";
-        sugLabel.textContent = "What to try";
-        details.appendChild(sugLabel);
-
-        const sugList = document.createElement("ul");
-        sugList.className = "suggestion-list";
-        suggestions.forEach((s) => {
-          const li = document.createElement("li");
-          li.textContent = s;
-          sugList.appendChild(li);
-        });
-        details.appendChild(sugList);
-
-        const variations = generateVariations(sentences);
-        const varLabel = document.createElement("div");
-        varLabel.className = "section-label";
-        varLabel.textContent = "3 variations to try (mechanical — your own words, reordered/merged/trimmed)";
-        details.appendChild(varLabel);
-
-        if (variations.length < 3) {
-          const note = document.createElement("p");
-          note.className = "var-note";
-          note.textContent = `Only ${variations.length} safe mechanical variation${variations.length === 1 ? "" : "s"} available — this paragraph is short/simple enough that generating a 3rd without inventing content risks being dishonest, so it's left out rather than faked.`;
-          details.appendChild(note);
-        }
-
-        variations.forEach((v) => {
-          const box = document.createElement("div");
-          box.className = "variation-box";
-          const vLabel = document.createElement("div");
-          vLabel.className = "variation-label";
-          vLabel.textContent = v.label;
-          const vText = document.createElement("p");
-          vText.className = "variation-text";
-          vText.textContent = v.text;
-          box.appendChild(vLabel);
-          box.appendChild(vText);
-          details.appendChild(box);
-        });
-
-        div.appendChild(details);
-      }
-
-      report.appendChild(div);
+      if (evidence.length) flaggedCount++;
+      report.appendChild(buildBlockElement({ text, sentences, score, evidence, suggestions }));
     });
 
     if (paraCount === 0) {
-      report.innerHTML = '<div class="empty">Paste a draft above and click Analyze.</div>';
+      report.innerHTML = '<div class="empty">Paste a draft above and click Analyze, or upload a Pangram report PDF.</div>';
     }
 
     document.getElementById("statLine").textContent =
       paraCount ? `${paraCount} paragraph${paraCount === 1 ? "" : "s"} checked · ${flaggedCount} flagged` : "";
   }
 
+  function renderPangramSegments(segments) {
+    const report = document.getElementById("report");
+    report.innerHTML = "";
+    let flaggedCount = 0;
+
+    segments.forEach((seg) => {
+      const { sentences, score, evidence, suggestions } = analyzeParagraph(seg.text, false);
+      if (evidence.length) flaggedCount++;
+      report.appendChild(buildBlockElement({
+        text: seg.text, sentences, score, evidence, suggestions, pangramInfo: seg
+      }));
+    });
+
+    document.getElementById("statLine").textContent =
+      `${segments.length} segment${segments.length === 1 ? "" : "s"} loaded from Pangram PDF · ${flaggedCount} also flagged by structural checks`;
+  }
+
   document.getElementById("analyzeBtn").addEventListener("click", () => {
     const text = document.getElementById("input").value;
     render(splitIntoBlocks(text));
+  });
+
+  function reconstructPdfText(items) {
+    const lines = [];
+    let currentLine = "";
+    let lastY = null;
+    let pendingGap = 0;
+
+    items.forEach((item) => {
+      const y = item.transform[5];
+      if (lastY === null) {
+        currentLine = item.str;
+      } else if (Math.abs(y - lastY) > 3) {
+        lines.push({ text: currentLine, gap: Math.abs(y - lastY) });
+        currentLine = item.str;
+      } else {
+        const needsSpace = currentLine && !currentLine.endsWith(" ") && !item.str.startsWith(" ");
+        currentLine += (needsSpace ? " " : "") + item.str;
+      }
+      lastY = y;
+    });
+    if (currentLine) lines.push({ text: currentLine, gap: 0 });
+
+    let out = "";
+    lines.forEach((line, i) => {
+      out += line.text;
+      if (i < lines.length - 1) out += lines[i + 1].gap > 14 ? "\n\n" : "\n";
+    });
+    return out;
+  }
+
+  const pdfBtn = document.getElementById("pdfBtn");
+  const pdfInput = document.getElementById("pdfInput");
+  const pdfStatus = document.getElementById("pdfStatus");
+
+  if (window.pdfjsLib) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdfjs/pdf.worker.min.js";
+  }
+
+  pdfBtn.addEventListener("click", () => pdfInput.click());
+
+  pdfInput.addEventListener("change", async () => {
+    const file = pdfInput.files[0];
+    if (!file) return;
+    pdfStatus.textContent = "Reading PDF…";
+    try {
+      if (!window.pdfjsLib) throw new Error("pdf.js failed to load (vendor/pdfjs/pdf.min.js missing or blocked).");
+      const buf = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+      let fullText = "";
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const content = await page.getTextContent();
+        fullText += reconstructPdfText(content.items) + "\n\n";
+      }
+      fullText = fullText.trim();
+
+      const segments = extractPangramSegments(fullText);
+      if (segments.length) {
+        const articleText = segments.map((s) => s.text).join("\n\n");
+        document.getElementById("input").value = articleText;
+        renderPangramSegments(segments);
+        pdfStatus.textContent =
+          `Parsed ${pdf.numPages} page${pdf.numPages === 1 ? "" : "s"} into ${segments.length} Pangram-labeled segment${segments.length === 1 ? "" : "s"}. Editing the text above and clicking Analyze will switch back to normal paragraph-based checking.`;
+      } else {
+        document.getElementById("input").value = fullText;
+        render(splitIntoBlocks(fullText));
+        pdfStatus.textContent =
+          `Extracted text from ${pdf.numPages} page${pdf.numPages === 1 ? "" : "s"}, but couldn't find Pangram's segment labels (report layout may have changed) — dropped the raw text into the box above instead. Review it before analyzing.`;
+      }
+    } catch (err) {
+      pdfStatus.textContent = "Couldn't read that PDF: " + err.message;
+    }
+    pdfInput.value = "";
   });
 
   document.getElementById("sampleBtn").addEventListener("click", () => {
