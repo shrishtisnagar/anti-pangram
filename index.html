@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>anti-pangram: structural pattern checker</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --panel: #ffffff;
+    --ink: #1f2328;
+    --muted: #6b7280;
+    --border: #e2e2e0;
+    --risk-high-bg: #fdeceb;
+    --risk-high-border: #e0685a;
+    --risk-med-bg: #fdf6e3;
+    --risk-med-border: #d6a520;
+    --risk-low-border: #d9d9d6;
+    --accent: #3a5a99;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181a;
+      --panel: #201f22;
+      --ink: #e7e6e4;
+      --muted: #9a9a97;
+      --border: #35342f;
+      --risk-high-bg: #3a1f1d;
+      --risk-high-border: #c8574a;
+      --risk-med-bg: #35301a;
+      --risk-med-border: #c9a233;
+      --risk-low-border: #3a3a37;
+      --accent: #8fb1e8;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17181a; --panel: #201f22; --ink: #e7e6e4; --muted: #9a9a97;
+    --border: #35342f; --risk-high-bg: #3a1f1d; --risk-high-border: #c8574a;
+    --risk-med-bg: #35301a; --risk-med-border: #c9a233; --risk-low-border: #3a3a37;
+    --accent: #8fb1e8;
+  }
+  :root[data-theme="light"] {
+    --bg: #fafaf9; --panel: #ffffff; --ink: #1f2328; --muted: #6b7280;
+    --border: #e2e2e0; --risk-high-bg: #fdeceb; --risk-high-border: #e0685a;
+    --risk-med-bg: #fdf6e3; --risk-med-border: #d6a520; --risk-low-border: #d9d9d6;
+    --accent: #3a5a99;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 28px 20px 80px; }
+  h1 { font-size: 1.35rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 0.92rem; margin: 0 0 18px; }
+  .caveat {
+    background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    border-radius: 6px; padding: 12px 14px; font-size: 0.88rem; color: var(--muted); margin-bottom: 20px;
+  }
+  .caveat strong { color: var(--ink); }
+  textarea {
+    width: 100%; min-height: 260px; resize: vertical; padding: 12px 14px;
+    border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--ink);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .row { display: flex; gap: 10px; align-items: center; margin: 12px 0 6px; flex-wrap: wrap; }
+  button {
+    background: var(--accent); color: #fff; border: none; border-radius: 6px;
+    padding: 9px 16px; font-size: 0.92rem; font-weight: 600; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  button.secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); font-weight: 500; }
+  .stat { font-size: 0.82rem; color: var(--muted); }
+  #report { margin-top: 26px; }
+  .para-block {
+    border: 1px solid var(--border); border-left: 4px solid var(--risk-low-border);
+    border-radius: 8px; background: var(--panel); padding: 14px 16px; margin-bottom: 14px;
+  }
+  .para-block.risk-high { border-left-color: var(--risk-high-border); background: var(--risk-high-bg); }
+  .para-block.risk-med { border-left-color: var(--risk-med-border); background: var(--risk-med-bg); }
+  .para-text { white-space: pre-wrap; margin: 0 0 8px; }
+  .badge {
+    display: inline-block; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em;
+    padding: 2px 8px; border-radius: 999px; margin-bottom: 8px; text-transform: uppercase;
+  }
+  .risk-high .badge { background: var(--risk-high-border); color: #fff; }
+  .risk-med .badge { background: var(--risk-med-border); color: #201f22; }
+  .risk-low .badge { background: var(--risk-low-border); color: var(--muted); }
+  details { margin-top: 6px; }
+  summary { cursor: pointer; font-size: 0.85rem; color: var(--accent); font-weight: 600; }
+  .evidence-list, .suggestion-list { margin: 8px 0 0; padding-left: 20px; font-size: 0.88rem; }
+  .evidence-list li { margin-bottom: 5px; }
+  .suggestion-list { color: var(--muted); }
+  .suggestion-list li { margin-bottom: 5px; }
+  .section-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 10px 0 2px; font-weight: 700; }
+  code { background: rgba(127,127,127,0.15); padding: 1px 5px; border-radius: 4px; font-size: 0.85em; }
+  .legend { font-size: 0.82rem; color: var(--muted); margin-top: 30px; border-top: 1px solid var(--border); padding-top: 14px; }
+  .legend summary { color: var(--muted); }
+  .empty { color: var(--muted); font-style: italic; padding: 30px 0; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>anti-pangram</h1>
+  <p class="sub">A structural pattern checker for your own drafts — not a Pangram clone, not a predictor of its score.</p>
+
+  <div class="caveat">
+    <strong>What this actually does:</strong> Pangram's real detection model is proprietary and unreachable from outside —
+    nothing here can reconstruct its actual reasoning. What it <em>can</em> do is flag a specific, well-documented pattern:
+    paragraphs that read as mechanically uniform (often the ones synthesizing a bullet list, or written in tightly parallel
+    technical prose). That structural uniformity is one of the most literature-backed signals AI detectors key on, so fixing
+    it is a reasonable, honest way to reduce your real false-positive rate — even though it can't guarantee any specific
+    Pangram verdict.
+  </div>
+
+  <textarea id="input" placeholder="Paste your draft here (plain text or markdown)…"></textarea>
+  <div class="row">
+    <button id="analyzeBtn">Analyze</button>
+    <button id="sampleBtn" class="secondary">Load example</button>
+    <span class="stat" id="statLine"></span>
+  </div>
+
+  <div id="report"></div>
+
+  <details class="legend">
+    <summary>What gets checked, and why</summary>
+    <ul>
+      <li><strong>Follows a bulleted/numbered list</strong> — paragraphs that immediately restate a preceding list in prose are the single most common false-positive trigger in technical writing.</li>
+      <li><strong>Uniform sentence length</strong> — low variance in words-per-sentence (low "burstiness") across a paragraph, a classic statistical AI-text signal.</li>
+      <li><strong>Repeated sentence openers</strong> — two or more sentences in the same paragraph starting with the same word ("This…", "This…"), a common LLM tic.</li>
+      <li><strong>Generic connective phrases</strong> — stock transitions ("Together, these…", "It's worth noting…", "This ensures…") that carry no specific content.</li>
+      <li><strong>Low concrete specificity</strong> — no numbers, proper nouns, contractions, or first-person markers anywhere in the paragraph — i.e. nothing a generic model couldn't have written about any topic.</li>
+    </ul>
+    <p>Severity is a simple weighted count of these signals, shown as high/medium so you know where to spend editing time first — it is not a probability and is not calibrated against Pangram's own scoring.</p>
+  </details>
+</div>
+
+<script>
+(function () {
+  const GENERIC_PHRASES = [
+    "together, these", "this means", "in other words", "it's worth noting",
+    "it is worth noting", "ultimately,", "overall,", "in summary", "this highlights",
+    "this underscores", "by doing so", "as a result,", "taken together",
+    "it's important to note", "it is important to note", "this ensures",
+    "this allows", "this enables", "at its core", "in essence",
+    "when it comes to", "that said,", "in today's", "plays a crucial role",
+    "it is essential to", "it's essential to", "this approach not only"
+  ];
+
+  function splitIntoBlocks(text) {
+    const lines = text.replace(/\r\n/g, "\n").split("\n");
+    const blocks = [];
+    let current = null;
+
+    const isListLine = (line) => /^\s*([-*•]|\d+[.)])\s+\S/.test(line);
+
+    for (const rawLine of lines) {
+      const line = rawLine;
+      const trimmed = line.trim();
+      if (trimmed === "") {
+        current = null;
+        continue;
+      }
+      const listLine = isListLine(line);
+      const type = listLine ? "list" : "para";
+      if (current && current.type === type) {
+        current.lines.push(trimmed);
+      } else {
+        current = { type, lines: [trimmed] };
+        blocks.push(current);
+      }
+    }
+    return blocks;
+  }
+
+  function splitSentences(paraText) {
+    const cleaned = paraText.replace(/\s+/g, " ").trim();
+    if (!cleaned) return [];
+    const parts = cleaned.split(/(?<=[.!?])\s+(?=[A-Z0-9"'‘“])/);
+    return parts.map((s) => s.trim()).filter(Boolean);
+  }
+
+  function wordCount(sentence) {
+    const m = sentence.match(/[A-Za-z0-9'-]+/g);
+    return m ? m.length : 0;
+  }
+
+  function mean(arr) { return arr.reduce((a, b) => a + b, 0) / arr.length; }
+  function stdev(arr) {
+    const m = mean(arr);
+    return Math.sqrt(mean(arr.map((x) => (x - m) ** 2)));
+  }
+
+  function analyzeParagraph(paraText, followsList) {
+    const sentences = splitSentences(paraText);
+    const evidence = [];
+    const suggestions = [];
+    let score = 0;
+
+    if (followsList) {
+      score += 2;
+      evidence.push("This paragraph immediately follows a bulleted/numbered list.");
+      suggestions.push("Don't just restate the bullets in prose — add something the list doesn't already say: a caveat, a trade-off, an opinion, or a concrete example from your own experience.");
+    }
+
+    if (sentences.length >= 3) {
+      const counts = sentences.map(wordCount);
+      const m = mean(counts);
+      const sd = stdev(counts);
+      const cv = m > 0 ? sd / m : 0;
+      if (cv < 0.25) {
+        score += 2;
+        evidence.push(
+          `Sentence lengths are unusually uniform (word counts: ${counts.join(", ")} — coefficient of variation ${cv.toFixed(2)}, below the 0.25 threshold this checks against).`
+        );
+        suggestions.push("Deliberately break the rhythm: merge two of the similar-length sentences into one, or cut one down to a short punchy fragment.");
+      }
+    }
+
+    const openerCounts = {};
+    sentences.forEach((s, i) => {
+      const m = s.match(/^[A-Za-z']+/);
+      if (!m) return;
+      const w = m[0].toLowerCase();
+      if (w.length <= 2) return;
+      openerCounts[w] = openerCounts[w] || [];
+      openerCounts[w].push(i + 1);
+    });
+    Object.entries(openerCounts).forEach(([word, idxs]) => {
+      if (idxs.length >= 2) {
+        score += 1.5;
+        evidence.push(`Sentences ${idxs.join(" and ")} both open with "${word.charAt(0).toUpperCase() + word.slice(1)}…".`);
+        suggestions.push(`Rewrite one of sentences ${idxs.join("/")} to open a different way — lead with the subject, a number, or a dependent clause instead.`);
+      }
+    });
+
+    sentences.forEach((s, i) => {
+      const lower = s.toLowerCase();
+      for (const phrase of GENERIC_PHRASES) {
+        if (lower.includes(phrase)) {
+          score += 1;
+          evidence.push(`Sentence ${i + 1} uses the generic connector "${phrase}" — carries no content specific to this topic.`);
+          suggestions.push(`Sentence ${i + 1}: replace "${phrase}" with something specific — a real number, tool name, or your actual reasoning for this exact case.`);
+          break;
+        }
+      }
+    });
+
+    if (sentences.length >= 3) {
+      const hasDigit = /\d/.test(paraText);
+      const hasContraction = /\b\w+'(t|re|ve|ll|d|m)\b/i.test(paraText);
+      const hasFirstPerson = /\b(I|I'm|I've|my|we|our|you'll|you're)\b/.test(paraText);
+      const properNouns = (paraText.match(/(?<!^|[.!?]\s)\b[A-Z][a-z]{2,}\b/g) || []).length;
+      if (!hasDigit && !hasContraction && !hasFirstPerson && properNouns === 0) {
+        score += 1.5;
+        evidence.push("No numbers, contractions, first-person voice, or proper nouns anywhere in this paragraph — nothing tying it to a specific, lived case.");
+        suggestions.push("Anchor it in something concrete: an actual version number, a real result you saw, a contraction, or a first-person aside.");
+      }
+    }
+
+    return { sentences, score, evidence, suggestions };
+  }
+
+  function riskClass(score) {
+    if (score >= 3.5) return "risk-high";
+    if (score >= 1.5) return "risk-med";
+    return "risk-low";
+  }
+  function riskLabel(score) {
+    if (score >= 3.5) return "High";
+    if (score >= 1.5) return "Medium";
+    return "Low";
+  }
+
+  function render(blocks) {
+    const report = document.getElementById("report");
+    report.innerHTML = "";
+    let flaggedCount = 0;
+    let paraCount = 0;
+    let prevType = null;
+
+    blocks.forEach((block) => {
+      if (block.type !== "para") {
+        prevType = block.type;
+        return;
+      }
+      paraCount++;
+      const text = block.lines.join(" ");
+      const followsList = prevType === "list";
+      const { score, evidence, suggestions } = analyzeParagraph(text, followsList);
+      prevType = block.type;
+
+      const div = document.createElement("div");
+      const cls = riskClass(score);
+      div.className = "para-block " + cls;
+
+      const badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = riskLabel(score) + " risk";
+      div.appendChild(badge);
+
+      const p = document.createElement("p");
+      p.className = "para-text";
+      p.textContent = text;
+      div.appendChild(p);
+
+      if (evidence.length) {
+        flaggedCount++;
+        const details = document.createElement("details");
+        details.open = cls === "risk-high";
+        const summary = document.createElement("summary");
+        summary.textContent = `Evidence & suggestions (${evidence.length})`;
+        details.appendChild(summary);
+
+        const evLabel = document.createElement("div");
+        evLabel.className = "section-label";
+        evLabel.textContent = "Why it was flagged";
+        details.appendChild(evLabel);
+
+        const evList = document.createElement("ul");
+        evList.className = "evidence-list";
+        evidence.forEach((e) => {
+          const li = document.createElement("li");
+          li.textContent = e;
+          evList.appendChild(li);
+        });
+        details.appendChild(evList);
+
+        const sugLabel = document.createElement("div");
+        sugLabel.className = "section-label";
+        sugLabel.textContent = "What to try";
+        details.appendChild(sugLabel);
+
+        const sugList = document.createElement("ul");
+        sugList.className = "suggestion-list";
+        suggestions.forEach((s) => {
+          const li = document.createElement("li");
+          li.textContent = s;
+          sugList.appendChild(li);
+        });
+        details.appendChild(sugList);
+
+        div.appendChild(details);
+      }
+
+      report.appendChild(div);
+    });
+
+    if (paraCount === 0) {
+      report.innerHTML = '<div class="empty">Paste a draft above and click Analyze.</div>';
+    }
+
+    document.getElementById("statLine").textContent =
+      paraCount ? `${paraCount} paragraph${paraCount === 1 ? "" : "s"} checked · ${flaggedCount} flagged` : "";
+  }
+
+  document.getElementById("analyzeBtn").addEventListener("click", () => {
+    const text = document.getElementById("input").value;
+    render(splitIntoBlocks(text));
+  });
+
+  document.getElementById("sampleBtn").addEventListener("click", () => {
+    document.getElementById("input").value =
+`Here are the main advantages of this approach:
+
+- It reduces latency by caching results
+- It simplifies the API surface
+- It avoids redundant database calls
+- It scales horizontally without extra config
+
+Together, these changes make the system significantly more efficient. This ensures that requests are handled faster. This means fewer resources are consumed overall. This approach not only improves performance but also reduces operational overhead. Overall, the architecture becomes easier to maintain and reason about.
+
+I spent three days last month debugging a caching bug that only showed up under load, and honestly the fix ended up being a one-line TTL change I should've caught in review.`;
+    render(splitIntoBlocks(document.getElementById("input").value));
+  });
+
+  render([]);
+})();
+</script>
+</body>
+</html>
