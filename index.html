@@ -129,10 +129,13 @@
       <li><strong>Follows a bulleted/numbered list</strong> — paragraphs that immediately restate a preceding list in prose are the single most common false-positive trigger in technical writing.</li>
       <li><strong>Uniform sentence length</strong> — low variance in words-per-sentence (low "burstiness") across a paragraph, a classic statistical AI-text signal.</li>
       <li><strong>Repeated sentence openers</strong> — two or more sentences in the same paragraph starting with the same word ("This…", "This…"), a common LLM tic.</li>
-      <li><strong>Generic connective phrases</strong> — stock transitions ("Together, these…", "It's worth noting…", "This ensures…") that carry no specific content.</li>
+      <li><strong>Nominalizations</strong> — verbs turned into abstract nouns ("revise" → "revision process", "interpret" → "interpretation"). In one documented adversarial test against Pangram, this was the single strongest lever for pushing a rating from Human toward AI.</li>
+      <li><strong>Polysyllabic word ratio</strong> — a high share of three-plus-syllable words in a paragraph, another lever from that same test. Flagged gently, since technical writing legitimately runs higher on this than casual prose — treat this one as the most likely false alarm of the set.</li>
+      <li><strong>Passive voice</strong> — two or more passive constructions ("was flagged", "is handled") in one paragraph, reading more like a report than a person narrating events.</li>
+      <li><strong>Generic connective phrases</strong> — stock transitions ("Together, these…", "It's worth noting…", "This ensures…"). Weighted lightly on its own: the same adversarial test found that swapping a "suspicious" word for a plainer one sometimes moved a passage toward an AI rating, not away — there's no reliable AI-word blacklist, so this signal only matters in combination with the others.</li>
       <li><strong>Low concrete specificity</strong> — no numbers, proper nouns, contractions, or first-person markers anywhere in the paragraph — i.e. nothing a generic model couldn't have written about any topic.</li>
     </ul>
-    <p>Severity is a simple weighted count of these signals, shown as high/medium so you know where to spend editing time first — it is not a probability and is not calibrated against Pangram's own scoring.</p>
+    <p>Severity is a simple weighted count of these signals, shown as high/medium so you know where to spend editing time first — it is not a probability and is not calibrated against Pangram's own scoring. Detectors like Pangram reportedly operate on hard internal thresholds, so a single small edit near that boundary can flip a verdict even though the underlying text barely changed — a paragraph still being flagged after one fix doesn't necessarily mean the fix did nothing.</p>
   </details>
 </div>
 
@@ -192,6 +195,15 @@
     return Math.sqrt(mean(arr.map((x) => (x - m) ** 2)));
   }
 
+  function countSyllables(word) {
+    let w = word.toLowerCase().replace(/[^a-z]/g, "");
+    if (w.length <= 3) return 1;
+    w = w.replace(/(?:[^laeiouy]es|ed|[^laeiouy]e)$/, "");
+    w = w.replace(/^y/, "");
+    const matches = w.match(/[aeiouy]{1,2}/g);
+    return matches ? matches.length : 1;
+  }
+
   function analyzeParagraph(paraText, followsList) {
     const sentences = splitSentences(paraText);
     const evidence = [];
@@ -239,13 +251,45 @@
       const lower = s.toLowerCase();
       for (const phrase of GENERIC_PHRASES) {
         if (lower.includes(phrase)) {
-          score += 1;
-          evidence.push(`Sentence ${i + 1} uses the generic connector "${phrase}" — carries no content specific to this topic.`);
+          score += 0.5;
+          evidence.push(`Sentence ${i + 1} uses the generic connector "${phrase}" — a weak signal alone, but adds up alongside other patterns here.`);
           suggestions.push(`Sentence ${i + 1}: replace "${phrase}" with something specific — a real number, tool name, or your actual reasoning for this exact case.`);
           break;
         }
       }
     });
+
+    const totalWords = paraText.match(/[A-Za-z0-9'-]+/g) || [];
+    const nominalizations = paraText.match(/\b[a-z]+(?:tion|sion|ment|ence|ance|ity|ism)\b/gi) || [];
+    if (totalWords.length >= 10 && nominalizations.length >= 3 && nominalizations.length / totalWords.length > 0.08) {
+      score += 1.5;
+      const uniqueNoms = [...new Set(nominalizations.map((w) => w.toLowerCase()))].slice(0, 6);
+      evidence.push(
+        `${nominalizations.length} nominalizations in ${totalWords.length} words (${uniqueNoms.join(", ")}) — verbs turned into abstract nouns, which flattens actions into descriptions of actions.`
+      );
+      suggestions.push('Turn some nominalizations back into verbs — e.g. "the revision process" → "revising it", "an exploration of" → "exploring".');
+    }
+
+    if (totalWords.length >= 15) {
+      const polyCount = totalWords.filter((w) => countSyllables(w) >= 3).length;
+      const polyRatio = polyCount / totalWords.length;
+      if (polyRatio > 0.28) {
+        score += 1.5;
+        evidence.push(
+          `${Math.round(polyRatio * 100)}% of words here are three-plus syllables (${polyCount}/${totalWords.length}) — well above typical conversational prose (~10-15%). If this is inherent technical terminology, treat this one as a likely false alarm.`
+        );
+        suggestions.push("Swap a few long/formal words for plainer ones where meaning allows, without watering down technical terms you actually need.");
+      }
+    }
+
+    const passiveMatches = paraText.match(/\b(?:is|are|was|were|be|been|being)\s+(?:[a-z]+ed|written|given|taken|made|known|shown|seen|done|said|held|built|brought|thought|taught|caught|bought|sold|told|felt|kept|left|meant|sent|spent|spoken|chosen|broken|driven|eaten|fallen|found|read|understood|used|born)\b/gi) || [];
+    if (passiveMatches.length >= 2) {
+      score += 1.5;
+      evidence.push(
+        `${passiveMatches.length} passive constructions found (e.g. "${passiveMatches.slice(0, 3).join('", "')}") — passive voice reads like a report rather than a person narrating what happened.`
+      );
+      suggestions.push('Rewrite a couple of these in active voice: "X was flagged by the system" → "The system flagged X" (or better, "I noticed X").');
+    }
 
     if (sentences.length >= 3) {
       const hasDigit = /\d/.test(paraText);
