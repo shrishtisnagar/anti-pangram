@@ -105,6 +105,15 @@
   .evidence-list li { margin-bottom: 5px; }
   .suggestion-list { color: var(--muted); }
   .suggestion-list li { margin-bottom: 5px; }
+  .baseline-list li { color: var(--ink); font-weight: 500; }
+  .baseline-summary {
+    background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    border-radius: 6px; padding: 12px 14px; font-size: 0.88rem; margin-bottom: 16px;
+  }
+  .baseline-summary h3 { margin: 0 0 6px; font-size: 0.92rem; }
+  .baseline-summary ul { margin: 6px 0 0; padding-left: 20px; }
+  .baseline-summary li { margin-bottom: 3px; }
+  .baseline-summary .note { color: var(--muted); font-size: 0.85rem; margin: 6px 0 0; }
   .section-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 10px 0 2px; font-weight: 700; }
   code { background: rgba(127,127,127,0.15); padding: 1px 5px; border-radius: 4px; font-size: 0.85em; }
   .variation-box {
@@ -161,6 +170,7 @@
     <p>Severity is a simple weighted count of these signals, shown as high/medium so you know where to spend editing time first — it is not a probability and is not calibrated against Pangram's own scoring. Detectors like Pangram reportedly operate on hard internal thresholds, so a single small edit near that boundary can flip a verdict even though the underlying text barely changed — a paragraph still being flagged after one fix doesn't necessarily mean the fix did nothing.</p>
     <p><strong>The "3 variations" per flagged paragraph</strong> are generated mechanically — reordering your existing sentences, merging two with a semicolon, or applying literal fixes (stripping a leading connector, swapping a nominalization for its verb form, converting a clear passive-with-"by" sentence to active voice) — never inventing new wording. When a paragraph is too short or simple for 3 safe mechanical moves, fewer are shown rather than padding with a fake one. Always proofread a variation before using it — mechanical reordering can occasionally read awkwardly even when grammatically valid.</p>
     <p><strong>Uploading a Pangram report PDF</strong> extracts each colored segment Pangram itself labeled (Human Written / AI Assisted / Fully AI Generated, with its confidence level), entirely in your browser via a locally-bundled copy of Mozilla's pdf.js — the PDF is never uploaded anywhere. Each segment is then run through the same structural checks above, so you can see where Pangram's own verdict and this tool's structural evidence agree or disagree. Parsing is based on Pangram's current report layout and may break if they change its format — if a PDF doesn't parse, the extracted text still lands in the box above for you to check and analyze manually. If a page has no real text layer (Pangram's report export is a rasterized image, not real text), it's run through a locally-bundled copy of Tesseract.js OCR instead — also entirely in-browser, nothing uploaded — which is generally accurate but not perfect (it reliably misreads "AI" as "Al", which is corrected automatically; other misreads may slip through, so proofread OCR'd text before trusting the analysis).</p>
+    <p><strong>"Compared to your own human-written segments in this report"</strong> only appears when a Pangram PDF is uploaded. Pangram labels some segments of your own document Human Written — that's a real, personal baseline for how you actually write, from the same document. Every AI-flagged segment is measured against that baseline instead of the generic thresholds above, so instead of "sentences are uniform" you get "your human segments here average X, this one is Y" — a direct, personalized answer to what's actually different about the paragraphs Pangram flagged, using your own writing as the control group. This needs at least 2 Human Written segments in the report to be reliable; with fewer, this section is skipped and you get the generic checks only. A document-level summary at the top of the report also shows the 2-3 patterns that most separate your AI-flagged segments from your human-written ones — the most efficient place to start editing.</p>
   </details>
 </div>
 
@@ -269,6 +279,7 @@
     const sentences = splitSentences(paraText);
     const evidence = [];
     const suggestions = [];
+    const metrics = { sentenceCount: sentences.length };
     let score = 0;
 
     if (followsList) {
@@ -282,6 +293,7 @@
       const m = mean(counts);
       const sd = stdev(counts);
       const cv = m > 0 ? sd / m : 0;
+      metrics.sentenceCV = cv;
       if (cv < 0.25) {
         score += 2;
         evidence.push(
@@ -300,18 +312,23 @@
       openerCounts[w] = openerCounts[w] || [];
       openerCounts[w].push(i + 1);
     });
+    let openerRepeatGroups = 0;
     Object.entries(openerCounts).forEach(([word, idxs]) => {
       if (idxs.length >= 2) {
+        openerRepeatGroups++;
         score += 1.5;
         evidence.push(`Sentences ${idxs.join(" and ")} both open with "${word.charAt(0).toUpperCase() + word.slice(1)}…".`);
         suggestions.push(`Rewrite one of sentences ${idxs.join("/")} to open a different way — lead with the subject, a number, or a dependent clause instead.`);
       }
     });
+    metrics.openerRepeatRate = sentences.length ? openerRepeatGroups / sentences.length : 0;
 
+    let genericPhraseCount = 0;
     sentences.forEach((s, i) => {
       const lower = s.toLowerCase();
       for (const phrase of GENERIC_PHRASES) {
         if (lower.includes(phrase)) {
+          genericPhraseCount++;
           score += 0.5;
           evidence.push(`Sentence ${i + 1} uses the generic connector "${phrase}" — a weak signal alone, but adds up alongside other patterns here.`);
           suggestions.push(`Sentence ${i + 1}: replace "${phrase}" with something specific — a real number, tool name, or your actual reasoning for this exact case.`);
@@ -319,9 +336,14 @@
         }
       }
     });
+    metrics.genericPhraseRate = sentences.length ? genericPhraseCount / sentences.length : 0;
 
     const totalWords = paraText.match(/[A-Za-z0-9'-]+/g) || [];
+    metrics.wordCount = totalWords.length;
     const nominalizations = paraText.match(/\b[a-z]+(?:tion|sion|ment|ence|ance|ity|ism)\b/gi) || [];
+    if (totalWords.length >= 10) {
+      metrics.nominalizationRatio = nominalizations.length / totalWords.length;
+    }
     if (totalWords.length >= 10 && nominalizations.length >= 3 && nominalizations.length / totalWords.length > 0.08) {
       score += 1.5;
       const uniqueNoms = [...new Set(nominalizations.map((w) => w.toLowerCase()))].slice(0, 6);
@@ -334,6 +356,7 @@
     if (totalWords.length >= 15) {
       const polyCount = totalWords.filter((w) => countSyllables(w) >= 3).length;
       const polyRatio = polyCount / totalWords.length;
+      metrics.polyRatio = polyRatio;
       if (polyRatio > 0.28) {
         score += 1.5;
         evidence.push(
@@ -344,6 +367,7 @@
     }
 
     const passiveMatches = paraText.match(/\b(?:is|are|was|were|be|been|being)\s+(?:[a-z]+ed|written|given|taken|made|known|shown|seen|done|said|held|built|brought|thought|taught|caught|bought|sold|told|felt|kept|left|meant|sent|spent|spoken|chosen|broken|driven|eaten|fallen|found|read|understood|used|born)\b/gi) || [];
+    metrics.passiveRate = sentences.length ? passiveMatches.length / sentences.length : 0;
     if (passiveMatches.length >= 2) {
       score += 1.5;
       evidence.push(
@@ -353,6 +377,7 @@
     }
 
     const emDashCount = (paraText.match(/—/g) || []).length;
+    metrics.emDashRate = sentences.length ? emDashCount / sentences.length : 0;
     if (sentences.length >= 2 && emDashCount >= 2 && emDashCount / sentences.length > 0.5) {
       score += 1;
       evidence.push(`${emDashCount} em dashes in this paragraph — Pangram's own published evidence guide lists heavy em-dash use as roughly 10x more common in AI text than human text.`);
@@ -360,6 +385,7 @@
     }
 
     const triadMatches = paraText.match(/\b[a-z][a-z'-]*(?:\s[a-z][a-z'-]*){0,2},\s[a-z][a-z'-]*(?:\s[a-z][a-z'-]*){0,2},?\sand\s[a-z][a-z'-]*(?:\s[a-z][a-z'-]*){0,2}\b/gi) || [];
+    metrics.triadRate = sentences.length ? triadMatches.length / sentences.length : 0;
     if (triadMatches.length >= 2) {
       score += 1;
       evidence.push(`${triadMatches.length} "X, Y, and Z" triads found (e.g. "${triadMatches[0]}") — Pangram lists grouping ideas in threes as roughly 4x more common in AI text.`);
@@ -374,6 +400,7 @@
     }
 
     const markdownHits = (paraText.match(/\*\*[^*]+\*\*/g) || []).length + (paraText.match(/^#{1,6}\s/m) ? 1 : 0);
+    metrics.markdownHits = markdownHits;
     if (markdownHits >= 2) {
       score += 0.5;
       evidence.push(`${markdownHits} markdown formatting marks (bold text or headers) in this paragraph — Pangram lists markdown formatting as roughly 12x more common in AI text.`);
@@ -381,6 +408,7 @@
     }
 
     const emojiMatches = paraText.match(/\p{Extended_Pictographic}/gu) || [];
+    metrics.emojiCount = emojiMatches.length;
     if (emojiMatches.length >= 1) {
       score += 0.5;
       evidence.push(`Emoji found in this paragraph (${emojiMatches.join(" ")}) — Pangram lists emoji use as roughly 2x more common in AI text, with specific emoji favored.`);
@@ -392,6 +420,7 @@
       const hasContraction = /\b\w+'(t|re|ve|ll|d|m)\b/i.test(paraText);
       const hasFirstPerson = /\b(I|I'm|I've|my|we|our|you'll|you're)\b/.test(paraText);
       const properNouns = (paraText.match(/(?<!^|[.!?]\s)\b[A-Z][a-z]{2,}\b/g) || []).length;
+      metrics.concreteMarkerCount = [hasDigit, hasContraction, hasFirstPerson, properNouns > 0].filter(Boolean).length;
       if (!hasDigit && !hasContraction && !hasFirstPerson && properNouns === 0) {
         score += 1.5;
         evidence.push("No numbers, contractions, first-person voice, or proper nouns anywhere in this paragraph — nothing tying it to a specific, lived case.");
@@ -399,7 +428,114 @@
       }
     }
 
-    return { sentences, score, evidence, suggestions };
+    return { sentences, score, evidence, suggestions, metrics };
+  }
+
+  // When a Pangram report PDF is uploaded, Pangram itself tells us which paragraphs in THIS
+  // document are Human Written and which it flagged as AI — a built-in control group from the
+  // same author. Rather than judging every segment against generic universal thresholds, we use
+  // the document's own Human Written segments as a personal baseline and measure how far the
+  // AI-flagged segments deviate from *that specific author's* natural writing.
+  const EPS = 0.02;
+
+  const METRIC_DEFS = [
+    {
+      key: "sentenceCV", label: "sentence-length uniformity", aiWhenHigh: false,
+      minSegForMention: () => true,
+      describe: (base, seg, ratio) => `Your human-written segments in this report vary sentence length with a coefficient of ${base.toFixed(2)} on average; this segment is far more mechanically uniform at ${seg.toFixed(2)} (${ratio.toFixed(1)}x tighter rhythm) — that kind of evenness is one of the most literature-backed AI-text signals.`,
+    },
+    {
+      key: "passiveRate", label: "passive voice", aiWhenHigh: true,
+      minSegForMention: (seg) => seg >= 0.12,
+      describe: (base, seg, ratio) => `Your human-written segments use passive constructions at ${base.toFixed(2)} per sentence on average; this segment runs ${seg.toFixed(2)} per sentence (${ratio.toFixed(1)}x higher).`,
+    },
+    {
+      key: "nominalizationRatio", label: "nominalizations (verbs turned into abstract nouns)", aiWhenHigh: true,
+      minSegForMention: (seg) => seg >= 0.05,
+      describe: (base, seg, ratio) => `Nominalizations make up ${(seg * 100).toFixed(0)}% of words here vs ${(base * 100).toFixed(0)}% in your human-written segments (${ratio.toFixed(1)}x higher) — actions flattened into descriptions of actions.`,
+    },
+    {
+      key: "polyRatio", label: "long/formal words", aiWhenHigh: true,
+      minSegForMention: (seg) => seg >= 0.2,
+      describe: (base, seg, ratio) => `${(seg * 100).toFixed(0)}% of words here are three-plus syllables vs ${(base * 100).toFixed(0)}% in your human-written segments (${ratio.toFixed(1)}x higher) — could be a false alarm if this is inherent technical terminology.`,
+    },
+    {
+      key: "emDashRate", label: "em dashes", aiWhenHigh: true,
+      minSegForMention: (seg) => seg >= 0.15,
+      describe: (base, seg, ratio) => `Em dashes appear at ${seg.toFixed(2)} per sentence here vs ${base.toFixed(2)} per sentence in your human-written segments (${ratio.toFixed(1)}x higher).`,
+    },
+    {
+      key: "triadRate", label: '"X, Y, and Z" triads', aiWhenHigh: true,
+      minSegForMention: (seg) => seg >= 0.1,
+      describe: (base, seg, ratio) => `Three-item "X, Y, and Z" groupings show up ${ratio.toFixed(1)}x more often here than in your human-written segments.`,
+    },
+    {
+      key: "genericPhraseRate", label: "generic connector phrases", aiWhenHigh: true,
+      minSegForMention: (seg) => seg >= 0.1,
+      describe: (base, seg, ratio) => `Generic connector phrases ("this means…", "it's worth noting…") show up ${ratio.toFixed(1)}x more often here than in your human-written segments.`,
+    },
+    {
+      key: "openerRepeatRate", label: "repeated sentence openers", aiWhenHigh: true,
+      minSegForMention: (seg) => seg >= 0.05,
+      describe: (base, seg, ratio) => `Sentences repeating the same opening word happen ${ratio.toFixed(1)}x more often here than in your human-written segments.`,
+    },
+    {
+      key: "markdownHits", label: "markdown formatting", aiWhenHigh: true,
+      minSegForMention: (seg) => seg >= 1,
+      describe: (base, seg, ratio) => `${seg} markdown formatting mark${seg === 1 ? "" : "s"} here vs ${base.toFixed(1)} average in your human-written segments.`,
+    },
+    {
+      key: "concreteMarkerCount", label: "concrete detail (numbers, names, first-person, contractions)", aiWhenHigh: false,
+      minSegForMention: () => true,
+      describe: (base, seg, ratio) => `Your human-written segments average ${base.toFixed(1)} of 4 concreteness markers (numbers, proper nouns, contractions, first-person wording) per paragraph; this segment has ${seg} — noticeably more generic.`,
+    },
+  ];
+
+  function computeBaseline(humanResults) {
+    const baseline = { count: humanResults.length };
+    METRIC_DEFS.forEach((def) => {
+      const vals = humanResults
+        .map((r) => r.metrics[def.key])
+        .filter((v) => v !== undefined && v !== null && !Number.isNaN(v));
+      if (vals.length >= 2) baseline[def.key] = mean(vals);
+    });
+    return baseline;
+  }
+
+  function metricRatio(def, baseVal, segVal) {
+    return def.aiWhenHigh ? (segVal + EPS) / (baseVal + EPS) : (baseVal + EPS) / (segVal + EPS);
+  }
+
+  function buildMetricComparisons(segMetrics, baseline) {
+    if (!baseline || baseline.count < 2) return [];
+    const found = [];
+    METRIC_DEFS.forEach((def) => {
+      const segVal = segMetrics[def.key];
+      const baseVal = baseline[def.key];
+      if (segVal === undefined || segVal === null || baseVal === undefined || baseVal === null) return;
+      if (def.minSegForMention && !def.minSegForMention(segVal)) return;
+      const ratio = metricRatio(def, baseVal, segVal);
+      if (ratio >= 1.4) found.push({ ratio, text: def.describe(baseVal, segVal, ratio) });
+    });
+    found.sort((a, b) => b.ratio - a.ratio);
+    return found.slice(0, 4).map((f) => f.text);
+  }
+
+  function computeTopDifferentiators(aiResults, baseline) {
+    if (!baseline || baseline.count < 2 || !aiResults.length) return [];
+    const scored = [];
+    METRIC_DEFS.forEach((def) => {
+      const baseVal = baseline[def.key];
+      if (baseVal === undefined || baseVal === null) return;
+      const segVals = aiResults.map((r) => r.metrics[def.key]).filter((v) => v !== undefined && v !== null);
+      if (!segVals.length) return;
+      const avgSeg = mean(segVals);
+      if (def.minSegForMention && !def.minSegForMention(avgSeg)) return;
+      const ratio = metricRatio(def, baseVal, avgSeg);
+      if (ratio >= 1.3) scored.push({ label: def.label, ratio });
+    });
+    scored.sort((a, b) => b.ratio - a.ratio);
+    return scored.slice(0, 3);
   }
 
   function applyLiteralFixes(sentences) {
@@ -595,10 +731,11 @@ Rewrite it into exactly 3 distinct versions that address these specific patterns
     return "pangram-assisted";
   }
 
-  function buildBlockElement({ text, sentences, score, evidence, suggestions, pangramInfo }) {
+  function buildBlockElement({ text, sentences, score, evidence, suggestions, pangramInfo, comparisons }) {
     const div = document.createElement("div");
     const cls = riskClass(score);
     div.className = "para-block " + cls;
+    comparisons = comparisons || [];
 
     const toolbar = document.createElement("div");
     toolbar.className = "para-toolbar";
@@ -633,40 +770,59 @@ Rewrite it into exactly 3 distinct versions that address these specific patterns
     p.textContent = text;
     div.appendChild(p);
 
-    if (evidence.length) {
+    if (evidence.length || comparisons.length) {
       const details = document.createElement("details");
-      details.open = cls === "risk-high";
+      details.open = cls === "risk-high" || comparisons.length > 0;
       const summary = document.createElement("summary");
-      summary.textContent = `Evidence & suggestions (${evidence.length})`;
+      const totalCount = evidence.length + comparisons.length;
+      summary.textContent = `Evidence & suggestions (${totalCount})`;
       details.appendChild(summary);
 
-      const evLabel = document.createElement("div");
-      evLabel.className = "section-label";
-      evLabel.textContent = "Why it was flagged";
-      details.appendChild(evLabel);
+      if (comparisons.length) {
+        const cmpLabel = document.createElement("div");
+        cmpLabel.className = "section-label";
+        cmpLabel.textContent = "Compared to your own human-written segments in this report";
+        details.appendChild(cmpLabel);
 
-      const evList = document.createElement("ul");
-      evList.className = "evidence-list";
-      evidence.forEach((e) => {
-        const li = document.createElement("li");
-        li.textContent = e;
-        evList.appendChild(li);
-      });
-      details.appendChild(evList);
+        const cmpList = document.createElement("ul");
+        cmpList.className = "evidence-list baseline-list";
+        comparisons.forEach((c) => {
+          const li = document.createElement("li");
+          li.textContent = c;
+          cmpList.appendChild(li);
+        });
+        details.appendChild(cmpList);
+      }
 
-      const sugLabel = document.createElement("div");
-      sugLabel.className = "section-label";
-      sugLabel.textContent = "What to try";
-      details.appendChild(sugLabel);
+      if (evidence.length) {
+        const evLabel = document.createElement("div");
+        evLabel.className = "section-label";
+        evLabel.textContent = comparisons.length ? "Also flagged by generic structural checks" : "Why it was flagged";
+        details.appendChild(evLabel);
 
-      const sugList = document.createElement("ul");
-      sugList.className = "suggestion-list";
-      suggestions.forEach((s) => {
-        const li = document.createElement("li");
-        li.textContent = s;
-        sugList.appendChild(li);
-      });
-      details.appendChild(sugList);
+        const evList = document.createElement("ul");
+        evList.className = "evidence-list";
+        evidence.forEach((e) => {
+          const li = document.createElement("li");
+          li.textContent = e;
+          evList.appendChild(li);
+        });
+        details.appendChild(evList);
+
+        const sugLabel = document.createElement("div");
+        sugLabel.className = "section-label";
+        sugLabel.textContent = "What to try";
+        details.appendChild(sugLabel);
+
+        const sugList = document.createElement("ul");
+        sugList.className = "suggestion-list";
+        suggestions.forEach((s) => {
+          const li = document.createElement("li");
+          li.textContent = s;
+          sugList.appendChild(li);
+        });
+        details.appendChild(sugList);
+      }
 
       const variations = generateVariations(sentences);
       const varLabel = document.createElement("div");
@@ -735,17 +891,61 @@ Rewrite it into exactly 3 distinct versions that address these specific patterns
     const report = document.getElementById("report");
     report.innerHTML = "";
     let flaggedCount = 0;
+    let baselineFlaggedCount = 0;
 
-    segments.forEach((seg) => {
-      const { sentences, score, evidence, suggestions } = analyzeParagraph(seg.text, false);
+    const results = segments.map((seg) => ({ seg, ...analyzeParagraph(seg.text, false) }));
+    const humanResults = results.filter((r) => r.seg.verdict.toLowerCase().includes("human"));
+    const aiResults = results.filter((r) => !r.seg.verdict.toLowerCase().includes("human"));
+    const baseline = computeBaseline(humanResults);
+    const topDiffs = computeTopDifferentiators(aiResults, baseline);
+
+    if (topDiffs.length || (aiResults.length && humanResults.length < 2)) {
+      const summary = document.createElement("div");
+      summary.className = "baseline-summary";
+
+      const h3 = document.createElement("h3");
+      const aiWords = aiResults.reduce((a, r) => a + (r.seg.words || 0), 0);
+      const totalWords = results.reduce((a, r) => a + (r.seg.words || 0), 0);
+      const pct = totalWords ? Math.round((aiWords / totalWords) * 100) : 0;
+      h3.textContent = `Pangram flagged ${aiResults.length} of ${results.length} segments as AI (${pct}% of this document by word count)`;
+      summary.appendChild(h3);
+
+      if (topDiffs.length) {
+        const p = document.createElement("p");
+        p.style.margin = "0";
+        p.textContent = "Compared against this document's own Human Written segments, the AI-flagged segments differ most in:";
+        summary.appendChild(p);
+        const ul = document.createElement("ul");
+        topDiffs.forEach((d) => {
+          const li = document.createElement("li");
+          li.textContent = `${d.label} (${d.ratio.toFixed(1)}x)`;
+          ul.appendChild(li);
+        });
+        summary.appendChild(ul);
+      } else {
+        const note = document.createElement("p");
+        note.className = "note";
+        note.textContent = `Only ${humanResults.length} Human Written segment${humanResults.length === 1 ? "" : "s"} in this report — not enough to build a reliable personal baseline (need at least 2), so segments below are shown with generic structural checks only.`;
+        summary.appendChild(note);
+      }
+      report.appendChild(summary);
+    }
+
+    results.forEach(({ seg, sentences, score, evidence, suggestions, metrics }) => {
       if (evidence.length) flaggedCount++;
+      const isAi = !seg.verdict.toLowerCase().includes("human");
+      const comparisons = isAi ? buildMetricComparisons(metrics, baseline) : [];
+      if (comparisons.length) baselineFlaggedCount++;
       report.appendChild(buildBlockElement({
-        text: seg.text, sentences, score, evidence, suggestions, pangramInfo: seg
+        text: seg.text, sentences, score, evidence, suggestions, pangramInfo: seg, comparisons
       }));
     });
 
+    const baselineNote = baseline.count >= 2
+      ? ` · ${baselineFlaggedCount} flagged against your own human-written baseline`
+      : "";
     document.getElementById("statLine").textContent =
-      `${segments.length} segment${segments.length === 1 ? "" : "s"} loaded from Pangram PDF · ${flaggedCount} also flagged by structural checks`;
+      `${segments.length} segment${segments.length === 1 ? "" : "s"} loaded from Pangram PDF · ${flaggedCount} also flagged by generic structural checks${baselineNote}`;
   }
 
   document.getElementById("analyzeBtn").addEventListener("click", () => {
